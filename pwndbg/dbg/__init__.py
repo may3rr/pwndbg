@@ -69,6 +69,11 @@ class DisassembledInstruction(TypedDict):
     length: int
 
 
+class DebuggerType(Enum):
+    GDB = 1
+    LLDB = 2
+
+
 class Arch:
     """
     The definition of an architecture.
@@ -99,6 +104,10 @@ class Arch:
 class StopPoint:
     """
     The handle to either an insalled breakpoint or watchpoint.
+
+    May be used in a `with` statement, in which case the stop point is
+    automatically removed at the end of the statement. This allows for easy
+    implementation of temporary breakpoints.
     """
 
     def remove(self) -> None:
@@ -113,6 +122,15 @@ class StopPoint:
         """
         raise NotImplementedError()
 
+    def __enter__(self) -> StopPoint:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """
+        Automatic breakpoint removal.
+        """
+        self.remove()
+
 
 class BreakpointLocation:
     """
@@ -123,6 +141,13 @@ class BreakpointLocation:
 
     def __init__(self, address: int):
         self.address = address
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, BreakpointLocation):
+            return self.address == other.address
+        if isinstance(other, int):
+            return self.address == other
+        return False
 
 
 class WatchpointLocation:
@@ -1127,12 +1152,25 @@ class Debugger:
         """
         raise NotImplementedError()
 
+    def breakpoint_locations(self) -> List[BreakpointLocation]:
+        """
+        Returns a list of all breakpoint locations that are currently
+        installed and enabled in the focused process.
+        """
+        raise NotImplementedError()
+
     # WARNING
     #
     # These are hacky parts of the API that were strictly necessary to bring up
     # pwndbg under LLDB without breaking it under GDB. Expect most of them to be
     # removed or replaced as the porting work continues.
     #
+
+    def name(self) -> DebuggerType:
+        """
+        The type of the current debugger.
+        """
+        raise NotImplementedError()
 
     # We'd like to be able to gate some imports off during porting. This aids in
     # that.

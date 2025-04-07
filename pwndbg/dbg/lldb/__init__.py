@@ -713,8 +713,8 @@ class OneShotAwaitable:
     def __init__(self, value: Any):
         self.value = value
 
-    def __await__(self) -> Generator[Any, Any, None]:
-        yield self.value
+    def __await__(self) -> Generator[Any, Any, Any]:
+        return (yield self.value)
 
 
 class YieldContinue:
@@ -2028,6 +2028,24 @@ class LLDB(pwndbg.dbg_mod.Debugger):
     @override
     def supports_breakpoint_creation_during_stop_handler(self) -> bool:
         return True
+
+    @override
+    def breakpoint_locations(self) -> List[pwndbg.dbg_mod.BreakpointLocation]:
+        inferior: LLDBProcess = self.selected_inferior()
+        if inferior is None:
+            return []
+
+        bps: List[lldb.SBBreakpoint] = inferior.target.breakpoints
+        locations: List[pwndbg.dbg_mod.BreakpointLocation] = []
+        for bp in bps:
+            if bp.IsValid() and bp.IsEnabled():
+                for location in bp.locations:
+                    locations.append(location.GetAddress().GetLoadAddress(inferior.target))
+        return locations
+
+    @override
+    def name(self) -> pwndbg.dbg_mod.DebuggerType:
+        return pwndbg.dbg_mod.DebuggerType.LLDB
 
     @override
     def x86_disassembly_flavor(self) -> Literal["att", "intel"]:

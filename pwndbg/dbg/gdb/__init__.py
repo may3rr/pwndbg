@@ -451,6 +451,14 @@ class GDBProcess(pwndbg.dbg_mod.Process):
             else:
                 stop_addr = int(message.split()[-1], 0)
 
+            # Handle case of memory read that wraps around the memory space back to 0, where high memory was readable but memory at 0 was not.
+            # Example: 2-byte read at 0xFFFF_FFFF in a 32-bit address space.
+            # GDB returns error: "Cannot access memory at address 0x0"
+            if stop_addr == 0 and stop_addr < addr:
+                # We could read from the top-portion of memory, but not after wrapping around
+                # Because we are doing a partial read, read until the max address
+                return self.read_memory(addr, pwndbg.aglib.arch.ptrmask - addr + 1)
+
             if stop_addr != addr:
                 return self.read_memory(addr, stop_addr - addr)
 
@@ -1540,6 +1548,40 @@ class GDB(pwndbg.dbg_mod.Debugger):
     @override
     def supports_breakpoint_creation_during_stop_handler(self) -> bool:
         return False
+
+    @override
+    def breakpoint_locations(self) -> List[pwndbg.dbg_mod.BreakpointLocation]:
+        bps = gdb.breakpoints()
+        locations: List[pwndbg.dbg_mod.BreakpointLocation] = []
+        for bp in bps:
+            if (
+                bp.is_valid()
+                and bp.enabled
+                and bp.type in (gdb.BP_BREAKPOINT, gdb.BP_HARDWARE_BREAKPOINT)
+                and bp.visible
+            ):
+                # GDB 13.1+
+                if hasattr(bp, "locations"):
+                    for location in bp.locations:
+                        locations.append(pwndbg.dbg_mod.BreakpointLocation(location.address))
+                else:
+                    # Num     Type           Disp Enb Address            What
+                    # 1       breakpoint     keep y   0x00007ffff7e90840 in __GI___libc_read at ../sysdeps/unix/sysv/linux/read.c:26
+                    bp_locations = gdb.execute(
+                        f"info breakpoint {bp.number}", to_string=True
+                    ).split("\n")
+                    for line in bp_locations:
+                        try:
+                            address = int(line.split()[4], 16)
+                            locations.append(pwndbg.dbg_mod.BreakpointLocation(address))
+                        except (IndexError, ValueError):
+                            # Ignore lines that don't have an address.
+                            pass
+        return locations
+
+    @override
+    def name(self) -> pwndbg.dbg_mod.DebuggerType:
+        return pwndbg.dbg_mod.DebuggerType.GDB
 
     @override
     def x86_disassembly_flavor(self) -> Literal["att", "intel"]:
