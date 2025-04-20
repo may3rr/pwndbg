@@ -55,6 +55,7 @@ gdb_architecture_name_fixup_list = (
     "riscv:rv64",
     "riscv",
     "loongarch64",
+    "s390:64-bit",
 )
 
 
@@ -430,54 +431,74 @@ class GDBProcess(pwndbg.dbg_mod.Process):
         pages.sort()
         return GDBMemoryMap(qemu, pages)
 
+    def _is_memory_readable(self, addr: int) -> bool:
+        try:
+            gdb.selected_inferior().read_memory(addr, 1)
+            return True
+        except gdb.error:
+            return False
+
+    def _find_memory_last_readable(self, start: int, count: int) -> int:
+        end = start + count
+        result = -1
+
+        if not self._is_memory_readable(start):
+            return result
+
+        while start <= end:
+            mid = (start + end + 1) // 2
+            if self._is_memory_readable(mid):
+                result = mid
+                start = mid + 1
+            else:
+                end = mid - 1
+
+        return result
+
     @override
     def read_memory(self, address: int, size: int, partial: bool = False) -> bytearray:
-        result = b""
         count = max(int(size), 0)
         addr = address
 
         try:
             result = gdb.selected_inferior().read_memory(addr, count)
+            return bytearray(result)
         except gdb.error as e:
             if not partial:
                 raise pwndbg.dbg_mod.Error(e)
 
-            message = str(e)
+            if not pwndbg.aglib.remote.is_remote():
+                message = str(e)
+                match = re.search(r"Memory at address (\w+) unavailable\.", message)
+                if match:
+                    stop_addr = int(match.group(1), 0)
+                else:
+                    stop_addr = int(message.split()[-1], 0)
 
-            stop_addr = addr
-            match = re.search(r"Memory at address (\w+) unavailable\.", message)
-            if match:
-                stop_addr = int(match.group(1), 0)
+                # Handle case of memory read that wraps around the memory space back to 0, where high memory was readable but memory at 0 was not.
+                # Example: 2-byte read at 0xFFFF_FFFF in a 32-bit address space.
+                # GDB returns error: "Cannot access memory at address 0x0"
+                if stop_addr == 0 and stop_addr < addr:
+                    # We could read from the top-portion of memory, but not after wrapping around
+                    # Because we are doing a partial read, read until the max address
+                    return self.read_memory(addr, pwndbg.aglib.arch.ptrmask - addr + 1)
+
+                if stop_addr > addr:
+                    return self.read_memory(addr, stop_addr - addr)
             else:
-                stop_addr = int(message.split()[-1], 0)
+                # Handle the case of remote debugging, where GDB's remote protocol
+                # returns the start address as the failed read address instead of the stop address.
+                # This is a limitation in how GDB handles the remote protocol, and while it could
+                # be fixed, it currently behaves this way.
+                #
+                # To work around this, we perform a binary search in the `_find_memory_last_readable` method
+                # to find the correct stop address that avoids the failure.
+                #
+                # For local debugging, this issue does not occur, and we proceed with the normal flow.
+                if (stop_addr := self._find_memory_last_readable(addr, count)) > 0:
+                    return self.read_memory(addr, stop_addr - addr + 1)
 
-            # Handle case of memory read that wraps around the memory space back to 0, where high memory was readable but memory at 0 was not.
-            # Example: 2-byte read at 0xFFFF_FFFF in a 32-bit address space.
-            # GDB returns error: "Cannot access memory at address 0x0"
-            if stop_addr == 0 and stop_addr < addr:
-                # We could read from the top-portion of memory, but not after wrapping around
-                # Because we are doing a partial read, read until the max address
-                return self.read_memory(addr, pwndbg.aglib.arch.ptrmask - addr + 1)
-
-            if stop_addr != addr:
-                return self.read_memory(addr, stop_addr - addr)
-
-            # QEMU will return the start address as the failed
-            # read address.  Try moving back a few pages at a time.
-            stop_addr = addr + count
-
-            # Move the stop address down to the previous page boundary
-            stop_addr &= PAGE_MASK
-            while stop_addr > addr:
-                result = self.read_memory(addr, stop_addr - addr)
-
-                if result:
-                    return bytearray(result)
-
-                # Move down by another page
-                stop_addr -= PAGE_SIZE
-
-        return bytearray(result)
+            raise pwndbg.dbg_mod.Error(e)
 
     @override
     def write_memory(self, address: int, data: bytearray, partial: bool = False) -> int:
@@ -742,6 +763,8 @@ class GDBProcess(pwndbg.dbg_mod.Process):
                 elif match == "rs6000":
                     # The RS/6000 architecture is compatible with the PowerPC common
                     match = "powerpc"
+                elif match == "s390:64-bit":
+                    match = "s390x"
                 return GDBArch(endian, match, ptrsize)  # type: ignore[arg-type]
 
         if not_exactly_arch:
@@ -1274,6 +1297,10 @@ def _gdb_event_class_from_event_type(ty: pwndbg.dbg_mod.EventType) -> Any:
 class GDB(pwndbg.dbg_mod.Debugger):
     @override
     def setup(self):
+        import pwnlib.update
+
+        pwnlib.update.disabled = True
+
         from pwndbg.commands import load_commands
 
         load_gdblib()
@@ -1302,14 +1329,46 @@ class GDB(pwndbg.dbg_mod.Debugger):
         handle SIGBUS  stop   print nopass
         handle SIGPIPE nostop print nopass
         handle SIGSEGV stop   print nopass
-        """.strip()
-
-        # See https://github.com/pwndbg/pwndbg/issues/808
-        if gdb_version[0] <= 9:
-            pre_commands += "\nset remote search-memory-packet off"
+        """
 
         for line in pre_commands.strip().splitlines():
             gdb.execute(line)
+
+        # See https://github.com/pwndbg/pwndbg/issues/2890#issuecomment-2813047212
+        # Note: Remove this in a late 2025 or 2026 release?
+        for deprecated_cmd in (
+            "vmmap_add",
+            "vmmap_clear",
+            "vmmap_load",
+            "vmmap_explore",
+            "vis_heap_chunks",
+            "heap_config",
+            "stack_explore",
+            "auxv_explore",
+            "log_level",
+            "find_fake_fast",
+            "malloc_chunk",
+            "top_chunk",
+            "try_free",
+            "save_ida",
+            "knft_dump",
+            "knft_list_chains",
+            "knft_list_exprs",
+            "knft_list_flowtables",
+            "knft_list_objects",
+            "knft_list_rules",
+            "knft_list_sets",
+            "knft_list_tables",
+            "patch_list",
+            "patch_revert",
+            "jemalloc_extent_info",
+            "jemalloc_find_extent",
+            "jemalloc_heap",
+        ):
+            fixed_cmd = deprecated_cmd.replace("_", "-")
+            gdb.execute(
+                f"alias -a {deprecated_cmd} = echo Use `{fixed_cmd}` instead (Pwndbg changed `_` to `-` in command names)\\n"
+            )
 
         # This may throw an exception, see pwndbg/pwndbg#27
         try:

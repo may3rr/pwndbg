@@ -21,7 +21,7 @@ from typing_extensions import ParamSpec
 
 import pwndbg
 import pwndbg.aglib.arch
-import pwndbg.aglib.disasm
+import pwndbg.aglib.disasm.disassembly
 import pwndbg.aglib.nearpc
 import pwndbg.aglib.regs
 import pwndbg.aglib.symbol
@@ -94,9 +94,10 @@ def clear_screen(out=sys.stdout) -> None:
 config_reserve_lines = pwndbg.config.add_param(
     "context-reserve-lines",
     "if-ctx-fits",
-    'when to reserve lines after the prompt to reduce context shake ("never", "if-ctx-fits"(default), "always")',
-    help_docstring="""\
-The "if-ctx-fits" setting only reserves lines if the whole context would still fit vertically in the current terminal window. Note that it doesn't take into account line-wrapping due to insufficient terminal width.
+    "when to reserve lines after the prompt to reduce context shake",
+    help_docstring="""
+The "if-ctx-fits" setting only reserves lines if the whole context would still fit vertically in the current terminal window.
+It doesn't take into account line-wrapping due to insufficient terminal width.
 """,  # TODO: maybe it could take into account line-wrapping?
     param_class=pwndbg.lib.config.PARAM_ENUM,
     enum_sequence=["never", "if-ctx-fits", "always"],
@@ -155,7 +156,7 @@ config_clear_screen = pwndbg.config.add_param(
     "context-clear-screen", False, "whether to clear the screen before printing the context"
 )
 config_output = pwndbg.config.add_param(
-    "context-output", "stdout", 'where pwndbg should output ("stdout" or file/tty).'
+    "context-output", "stdout", 'where pwndbg should output ("stdout" or file/tty)'
 )
 config_context_sections = pwndbg.config.add_param(
     "context-sections",
@@ -626,7 +627,10 @@ def context_expressions(target=sys.stdout, with_banner=True, width=None):
 config_context_ghidra = pwndbg.config.add_param(
     "context-ghidra",
     "never",
-    "when to try to decompile the current function with ghidra (slow and requires radare2/r2pipe or rizin/rzpipe) (valid values: always, never, if-no-source)",
+    "when to try to decompile the current function with ghidra",
+    help_docstring="Doing this is slow and requires radare2/r2pipe or rizin/rzpipe.",
+    param_class=pwndbg.lib.config.PARAM_ENUM,
+    enum_sequence=["always", "never", "if-no-source"],
 )
 
 
@@ -972,10 +976,10 @@ def try_emulate_if_bug_disable(handler: Callable[[], T]) -> T:
 @serve_context_history
 def context_disasm(target=sys.stdout, with_banner=True, width=None):
     flavor = pwndbg.dbg.x86_disassembly_flavor()
-    syntax = pwndbg.aglib.disasm.CapstoneSyntax[flavor]
+    syntax = pwndbg.aglib.disasm.disassembly.CapstoneSyntax[flavor]
 
     # Get the Capstone object to set disassembly syntax
-    cs = next(iter(pwndbg.aglib.disasm.get_disassembler_cached.cache.values()), None)
+    cs = next(iter(pwndbg.aglib.disasm.disassembly.get_disassembler_cached.cache.values()), None)
 
     # The `None` case happens when the cache was not filled yet (see e.g. #881)
     if cs is not None and cs.syntax != syntax:
@@ -1195,7 +1199,7 @@ def context_backtrace(with_banner=True, target=sys.stdout, width=None):
 
 @serve_context_history
 def context_args(with_banner=True, target=sys.stdout, width=None):
-    args = pwndbg.arguments.format_args(pwndbg.aglib.disasm.one())
+    args = pwndbg.arguments.format_args(pwndbg.aglib.disasm.disassembly.one())
 
     # early exit to skip section if no arg found
     if not args:

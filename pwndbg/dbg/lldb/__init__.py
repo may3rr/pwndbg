@@ -939,7 +939,7 @@ class LLDBProcess(pwndbg.dbg_mod.Process):
         e = lldb.SBError()
         buffer = self.process.ReadMemory(address, size, e)
         if buffer:
-            return buffer
+            return bytearray(buffer)
         elif not partial:
             raise pwndbg.dbg_mod.Error(f"could not read {size:#x} bytes: {e}")
 
@@ -1751,6 +1751,10 @@ class LLDB(pwndbg.dbg_mod.Debugger):
 
     @override
     def setup(self, *args, **kwargs):
+        import pwnlib.update
+
+        pwnlib.update.disabled = True
+
         self.exec_states = []
         self.event_handlers = {}
         self.controllers = []
